@@ -1,0 +1,1016 @@
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer.rs b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+index 2404ad1..e2480fe 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+@@ -34,8 +34,8 @@
+ //! preserves dismissal across offset-only edits without suppressing a later identical token.
+ //!
+ //! Slash-command dismissal is tracked separately. Pressing `Esc` while the command popup is active
+-//! records the first-line `/name` token and keeps the popup closed while that token is unchanged.
+-//! Editing the command token clears the dismissal and allows the popup to reopen.
++//! records the active `/name` token and keeps the popup closed while that exact occurrence is
++//! unchanged. Editing the command token clears the dismissal and allows the popup to reopen.
+ //!
+ //! # History Navigation (↑/↓)
+ //!
+@@ -3830,13 +3830,13 @@ impl ChatComposer {
+     /// textarea. This must be called after every modification that can change
+     /// the text so the popup is shown/updated/hidden as appropriate.
+     fn sync_command_popup(&mut self, allow: bool) {
+-        let text = self.draft.textarea.text();
+-        let first_line_end = text.find('\n').unwrap_or(text.len());
+-        let first_line = &text[..first_line_end];
+-        // Keep an explicitly dismissed popup closed until the command token changes.
+-        let command_token = slash_input::command_popup_filter_text(first_line, /*cursor*/ 0);
+-        if let Some(command_token) = command_token.as_deref()
+-            && self.popups.dismissed_command_token.as_deref() == Some(command_token)
++        let completion_target = self.current_slash_completion_target();
++        if let Some((range, query)) = completion_target.as_ref()
++            && self
++                .popups
++                .dismissed_command_token
++                .as_ref()
++                .is_some_and(|dismissed| dismissed.matches(&self.draft.textarea, range, query))
+         {
+             return;
+         }
+@@ -3848,17 +3848,9 @@ impl ChatComposer {
+             }
+             return;
+         }
+-        // Determine whether the caret is inside the initial '/name' token on the first line.
+-        let cursor = self.draft.textarea.cursor();
+-        let caret_on_first_line = cursor <= first_line_end;
+-
+-        let is_editing_slash_command_name = caret_on_first_line
+-            && self
+-                .slash_input()
+-                .is_editing_command_name(first_line, cursor);
+-        let command_filter_text = caret_on_first_line
+-            .then(|| slash_input::command_popup_filter_text(first_line, cursor))
+-            .flatten();
++        let command_filter_text = completion_target
++            .as_ref()
++            .map(|(_range, query)| format!("/{query}"));
+ 
+         // If the cursor is currently positioned within an `@token`, prefer the
+         // file-search popup over the slash popup so users can insert a file path
+@@ -3871,20 +3863,29 @@ impl ChatComposer {
+         }
+         match &mut self.popups.active {
+             ActivePopup::Command(popup) => {
+-                if is_editing_slash_command_name {
++                let keep_open = if completion_target.is_some() {
+                     if let Some(command_filter_text) = command_filter_text.as_deref() {
+                         popup.on_composer_text_change(command_filter_text.to_string());
+                     }
++                    popup.has_completion_candidates()
+                 } else {
++                    false
++                };
++                if !keep_open {
+                     self.popups.active = ActivePopup::None;
+                 }
+             }
+             _ => {
+-                if is_editing_slash_command_name
++                if completion_target.is_some()
+                     && let Some(command_filter_text) = command_filter_text.as_deref()
+                 {
+-                    let command_popup = self.slash_input().command_popup(command_filter_text);
+-                    self.popups.active = ActivePopup::Command(command_popup);
++                    let mentions = self.mention_items();
++                    let command_popup = self
++                        .slash_input()
++                        .command_popup(command_filter_text, mentions);
++                    if command_popup.has_completion_candidates() {
++                        self.popups.active = ActivePopup::Command(command_popup);
++                    }
+                 }
+             }
+         }
+@@ -8914,6 +8915,9 @@ mod tests {
+                 Some(CommandItem::ServiceTier(command)) => {
+                     panic!("expected model command, got service tier {command:?}")
+                 }
++                Some(CommandItem::Mention(mention)) => {
++                    panic!("expected model command, got mention {mention:?}")
++                }
+                 None => panic!("no selected command for '/mo'"),
+             },
+             _ => panic!("slash popup not active after typing '/mo'"),
+@@ -8996,6 +9000,9 @@ mod tests {
+                 Some(CommandItem::ServiceTier(command)) => {
+                     panic!("expected resume command, got service tier {command:?}")
+                 }
++                Some(CommandItem::Mention(mention)) => {
++                    panic!("expected resume command, got mention {mention:?}")
++                }
+                 None => panic!("no selected command for '/res'"),
+             },
+             _ => panic!("slash popup not active after typing '/res'"),
+@@ -9050,6 +9057,9 @@ mod tests {
+                 Some(CommandItem::ServiceTier(command)) => {
+                     panic!("expected pets command, got service tier {command:?}")
+                 }
++                Some(CommandItem::Mention(mention)) => {
++                    panic!("expected pets command, got mention {mention:?}")
++                }
+                 None => panic!("no selected command for '/pet'"),
+             },
+             _ => panic!("slash popup not active after typing '/pet'"),
+@@ -9104,6 +9114,9 @@ mod tests {
+                 Some(CommandItem::ServiceTier(command)) => {
+                     panic!("expected btw command, got service tier {command:?}")
+                 }
++                Some(CommandItem::Mention(mention)) => {
++                    panic!("expected btw command, got mention {mention:?}")
++                }
+                 None => panic!("no selected command for '/bt'"),
+             },
+             _ => panic!("slash popup not active after typing '/bt'"),
+@@ -9158,6 +9171,9 @@ mod tests {
+                 Some(CommandItem::ServiceTier(command)) => {
+                     panic!("expected side command, got service tier {command:?}")
+                 }
++                Some(CommandItem::Mention(mention)) => {
++                    panic!("expected side command, got mention {mention:?}")
++                }
+                 None => panic!("no selected command for '/si'"),
+             },
+             _ => panic!("slash popup not active after typing '/si'"),
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/popup_state.rs b/codex-rs/tui/src/bottom_pane/chat_composer/popup_state.rs
+index 2f97ecd..b177daa 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer/popup_state.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer/popup_state.rs
+@@ -89,7 +89,7 @@ fn complete_token_occurrences_before(textarea: &TextArea, token: &str, before: u
+ #[derive(Default)]
+ pub(super) struct PopupState {
+     pub(super) active: ActivePopup,
+-    pub(super) dismissed_command_token: Option<String>,
++    pub(super) dismissed_command_token: Option<DismissedToken>,
+     pub(super) dismissed_file_token: Option<DismissedToken>,
+     pub(super) current_file_query: Option<String>,
+     pub(super) dismissed_mention_token: Option<DismissedToken>,
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs b/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs
+index d8a6201..011e720 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs
+@@ -10,11 +10,11 @@ use crate::bottom_pane::command_popup::CommandItem;
+ use crate::bottom_pane::command_popup::CommandPopup;
+ use crate::bottom_pane::command_popup::CommandPopupFlags;
+ use crate::bottom_pane::prompt_args::parse_slash_name;
++use crate::bottom_pane::skill_popup::MentionItem;
+ use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
+ use crate::bottom_pane::slash_commands::ServiceTierCommand;
+ use crate::bottom_pane::slash_commands::SlashCommandItem;
+ use crate::bottom_pane::slash_commands::find_slash_command;
+-use crate::bottom_pane::slash_commands::has_slash_command_prefix;
+ use crate::slash_command::SlashCommand;
+ use codex_protocol::user_input::ByteRange;
+ use codex_protocol::user_input::TextElement;
+@@ -22,8 +22,10 @@ use codex_protocol::user_input::TextElement;
+ use super::super::footer::reset_mode_after_activity;
+ use super::ActivePopup;
+ use super::ChatComposer;
++use super::DismissedToken;
+ use super::InputResult;
+ use super::QueuedInputAction;
++use super::completion_target;
+ use super::parent_owned_command_is_allowed;
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -154,21 +156,11 @@ impl<'a> SlashInput<'a> {
+         self.command(name).is_some().then_some(0..element_end)
+     }
+ 
+-    pub(super) fn is_editing_command_name(&self, first_line: &str, cursor: usize) -> bool {
+-        let Some((name, rest)) = command_under_cursor(first_line, cursor) else {
+-            return false;
+-        };
+-        if !self.enabled {
+-            return false;
+-        }
+-        if name.is_empty() {
+-            return rest.is_empty();
+-        }
+-
+-        has_slash_command_prefix(name, self.command_flags, self.service_tier_commands)
+-    }
+-
+-    pub(super) fn command_popup(&self, filter_text: &str) -> CommandPopup {
++    pub(super) fn command_popup(
++        &self,
++        filter_text: &str,
++        mentions: Vec<MentionItem>,
++    ) -> CommandPopup {
+         let mut command_popup = CommandPopup::new(
+             CommandPopupFlags {
+                 collaboration_modes_enabled: self.command_flags.collaboration_modes_enabled,
+@@ -182,6 +174,7 @@ impl<'a> SlashInput<'a> {
+                 side_conversation_active: self.command_flags.side_conversation_active,
+             },
+             self.service_tier_commands.to_vec(),
++            mentions,
+         );
+         command_popup.on_composer_text_change(filter_text.to_string());
+         command_popup
+@@ -216,13 +209,17 @@ impl ChatComposer {
+         }
+         if key_event.code == KeyCode::Esc {
+             // Always dismiss the popup without changing the draft.
+-            let first_line = self.draft.textarea.text().lines().next().unwrap_or("");
+-            self.popups.dismissed_command_token =
+-                command_popup_filter_text(first_line, /*cursor*/ 0);
++            if let Some((range, query)) = self.current_slash_completion_target() {
++                self.popups.dismissed_command_token =
++                    Some(DismissedToken::new(&self.draft.textarea, range, query));
++            }
+             self.popups.active = ActivePopup::None;
+             return (InputResult::None, true);
+         }
+         self.footer.mode = reset_mode_after_activity(self.footer.mode);
++        let active_filter_text = self
++            .current_slash_completion_target()
++            .map(|(_range, query)| format!("/{query}"));
+         let ActivePopup::Command(popup) = &mut self.popups.active else {
+             unreachable!();
+         };
+@@ -258,11 +255,14 @@ impl ChatComposer {
+                 // before applying completion.
+                 let text = self.draft.textarea.text();
+                 let first_line = text.lines().next().unwrap_or("").to_owned();
+-                let cursor = self.draft.textarea.cursor();
+-                let filter_text = command_popup_filter_text(&first_line, cursor)
+-                    .unwrap_or_else(|| first_line.clone());
++                let filter_text = active_filter_text.unwrap_or_else(|| first_line.clone());
+                 popup.on_composer_text_change(filter_text);
+                 if let Some(selected_cmd) = popup.selected_item() {
++                    if self.insert_selected_slash_mention(&selected_cmd)
++                        || self.complete_selected_midline_slash_command(&selected_cmd)
++                    {
++                        return (InputResult::None, true);
++                    }
+                     if selected_command_dispatches_immediately_on_tab(&selected_cmd)
+                         && let CommandItem::Builtin(cmd) = &selected_cmd
+                     {
+@@ -308,11 +308,14 @@ impl ChatComposer {
+                 // while the slash-command popup is active.
+                 let text = self.draft.textarea.text();
+                 let first_line = text.lines().next().unwrap_or("").to_owned();
+-                let cursor = self.draft.textarea.cursor();
+-                let filter_text = command_popup_filter_text(&first_line, cursor)
+-                    .unwrap_or_else(|| first_line.clone());
++                let filter_text = active_filter_text.unwrap_or_else(|| first_line.clone());
+                 popup.on_composer_text_change(filter_text);
+                 if let Some(selected_cmd) = popup.selected_item() {
++                    if self.insert_selected_slash_mention(&selected_cmd)
++                        || self.complete_selected_midline_slash_command(&selected_cmd)
++                    {
++                        return (InputResult::None, true);
++                    }
+                     if self
+                         .complete_selected_slash_command_preserving_existing_draft_tail_as_inline_args(
+                             &selected_cmd,
+@@ -343,6 +346,11 @@ impl ChatComposer {
+                 ..
+             } => {
+                 if let Some(sel) = popup.selected_item() {
++                    if self.insert_selected_slash_mention(&sel)
++                        || self.complete_selected_midline_slash_command(&sel)
++                    {
++                        return (InputResult::None, true);
++                    }
+                     if self.blocks_direct_input {
+                         let command_is_allowed = match &sel {
+                             CommandItem::Builtin(cmd) => {
+@@ -351,6 +359,7 @@ impl ChatComposer {
+                                 )
+                             }
+                             CommandItem::ServiceTier(_) => false,
++                            CommandItem::Mention(_) => false,
+                         };
+                         if !command_is_allowed {
+                             return (InputResult::ParentOwnedInputBlocked, true);
+@@ -374,6 +383,9 @@ impl ChatComposer {
+                             CommandItem::ServiceTier(command) => {
+                                 InputResult::ServiceTierCommand(command)
+                             }
++                            CommandItem::Mention(_) => unreachable!(
++                                "mention selections are inserted before command dispatch"
++                            ),
+                         },
+                         true,
+                     );
+@@ -450,6 +462,75 @@ impl ChatComposer {
+         true
+     }
+ 
++    pub(super) fn current_slash_completion_target(&self) -> Option<(Range<usize>, String)> {
++        let (range, full_query) = completion_target::current_prefixed_token_range(
++            &self.draft.textarea,
++            '/',
++            /*allow_empty*/ true,
++        )?;
++        let cursor = self.draft.textarea.cursor();
++        let query_start = range.start.saturating_add(1);
++        if cursor < range.start || cursor > range.end {
++            return None;
++        }
++        if cursor == range.start
++            && self
++                .draft
++                .textarea
++                .text()
++                .get(range.end..)
++                .is_some_and(|tail| tail.starts_with(char::is_whitespace))
++        {
++            return None;
++        }
++        let query = if cursor == range.start {
++            full_query
++        } else {
++            self.draft
++                .textarea
++                .text()
++                .get(query_start..cursor)?
++                .to_string()
++        };
++        query
++            .as_bytes()
++            .iter()
++            .all(|byte| super::is_mention_name_char(*byte) || *byte == b':')
++            .then_some((range, query))
++    }
++
++    fn insert_selected_slash_mention(&mut self, selected: &CommandItem) -> bool {
++        let CommandItem::Mention(mention) = selected else {
++            return false;
++        };
++        let Some((range, _query)) = self.current_slash_completion_target() else {
++            return false;
++        };
++        self.insert_selected_mention(range, &mention.insert_text, mention.path.as_deref());
++        true
++    }
++
++    fn complete_selected_midline_slash_command(&mut self, selected: &CommandItem) -> bool {
++        if matches!(selected, CommandItem::Mention(_)) {
++            return false;
++        }
++        let Some((range, _query)) = self.current_slash_completion_target() else {
++            return false;
++        };
++        if range.start == 0 {
++            return false;
++        }
++
++        let replacement = format!("/{}", selected.command());
++        let start = range.start;
++        self.draft.textarea.replace_range(range, &replacement);
++        self.draft
++            .textarea
++            .set_cursor(start.saturating_add(replacement.len()));
++        self.advance_past_completion_separator();
++        true
++    }
++
+     /// Keep slash command elements aligned with the current first line.
+     pub(super) fn sync_slash_command_elements(&mut self) {
+         if !self.slash_commands_enabled() {
+@@ -537,47 +618,14 @@ pub(super) fn args_elements(
+         .collect()
+ }
+ 
+-pub(super) fn command_popup_filter_text(first_line: &str, cursor: usize) -> Option<String> {
+-    let (name, _rest) = command_under_cursor(first_line, cursor)?;
+-    Some(format!("/{name}"))
+-}
+-
+-/// If the cursor is currently within a slash command on the first line,
+-/// extract the command fragment before the cursor and the rest of the line after it.
+-fn command_under_cursor(first_line: &str, cursor: usize) -> Option<(&str, &str)> {
+-    if !first_line.starts_with('/') {
+-        return None;
+-    }
+-    if cursor > first_line.len() || !first_line.is_char_boundary(cursor) {
+-        return None;
+-    }
+-
+-    let name_start = 1usize;
+-    let name_end = first_line[name_start..]
+-        .find(char::is_whitespace)
+-        .map(|idx| name_start + idx)
+-        .unwrap_or_else(|| first_line.len());
+-
+-    let cursor = if cursor <= name_start {
+-        name_end
+-    } else {
+-        cursor
+-    };
+-    if cursor > name_end {
+-        return None;
+-    }
+-
+-    let name = &first_line[name_start..cursor];
+-    let rest = &first_line[cursor..];
+-
+-    Some((name, rest))
+-}
+-
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+     use crate::app_event::AppEvent;
+     use crate::bottom_pane::AppEventSender;
++    use crate::test_support::PathBufExt;
++    use crate::test_support::test_path_buf;
++    use codex_app_server_protocol::SkillMetadata;
+     use pretty_assertions::assert_eq;
+     use tokio::sync::mpsc::unbounded_channel;
+ 
+@@ -610,6 +658,24 @@ mod tests {
+         composer_with_text_at_cursor(&format!("{prefix}{draft}"), prefix.len())
+     }
+ 
++    fn composer_with_skill_and_text(skill_name: &str, text: &str) -> ChatComposer {
++        let mut composer = test_composer();
++        composer.set_skill_mentions(Some(vec![SkillMetadata {
++            name: skill_name.to_string(),
++            description: "Slash completion test skill.".to_string(),
++            short_description: None,
++            interface: None,
++            dependencies: None,
++            path: test_path_buf(&format!("/tmp/{skill_name}/SKILL.md")).abs(),
++            scope: crate::test_support::skill_scope_user(),
++            enabled: true,
++        }]));
++        composer.draft.textarea.set_text_clearing_elements(text);
++        composer.draft.textarea.set_cursor(text.len());
++        composer.sync_popups();
++        composer
++    }
++
+     #[test]
+     fn esc_dismisses_slash_popup_while_idle() {
+         let mut composer = composer_with_text_at_cursor("/rev", "/rev".len());
+@@ -621,6 +687,40 @@ mod tests {
+         assert_eq!(composer.draft.textarea.text(), "/rev");
+     }
+ 
++    #[test]
++    fn midline_slash_opens_skill_completion_and_inserts_bound_mention() {
++        let mut composer = composer_with_skill_and_text("codex-review", "검토해줘 /codex");
++        let ActivePopup::Command(popup) = &composer.popups.active else {
++            panic!("expected unified slash popup");
++        };
++        assert!(matches!(
++            popup.selected_item(),
++            Some(CommandItem::Mention(_))
++        ));
++
++        assert_eq!(press(&mut composer, KeyCode::Enter), InputResult::None);
++        assert_eq!(composer.draft.textarea.text(), "검토해줘 $codex-review ");
++        assert_eq!(composer.mention_bindings().len(), 1);
++    }
++
++    #[test]
++    fn midline_builtin_completion_does_not_dispatch_or_clear_draft() {
++        let mut composer = composer_with_text_at_cursor("확인하고 /sta", "확인하고 /sta".len());
++
++        assert_eq!(press(&mut composer, KeyCode::Enter), InputResult::None);
++        assert_eq!(composer.draft.textarea.text(), "확인하고 /status ");
++    }
++
++    #[test]
++    fn slash_inside_url_does_not_open_command_popup() {
++        let composer = composer_with_text_at_cursor(
++            "문서는 https://example.com/docs 참고",
++            "문서는 https://example.com/docs".len(),
++        );
++
++        assert!(!matches!(composer.popups.active, ActivePopup::Command(_)));
++    }
++
+     #[test]
+     fn slash_completion_preserves_existing_draft_tail_for_inline_arg_commands() {
+         let draft = "view the diff";
+diff --git a/codex-rs/tui/src/bottom_pane/command_popup.rs b/codex-rs/tui/src/bottom_pane/command_popup.rs
+index f613e5e..65c49b1 100644
+--- a/codex-rs/tui/src/bottom_pane/command_popup.rs
++++ b/codex-rs/tui/src/bottom_pane/command_popup.rs
+@@ -9,6 +9,7 @@ use super::selection_popup_common::ColumnWidthMode;
+ use super::selection_popup_common::GenericDisplayRow;
+ use super::selection_popup_common::measure_rows_height_with_col_width_mode;
+ use super::selection_popup_common::render_rows_with_col_width_mode;
++use super::skill_popup::MentionItem;
+ use super::slash_commands::BuiltinCommandFlags;
+ use super::slash_commands::ServiceTierCommand;
+ use super::slash_commands::SlashCommandItem;
+@@ -16,6 +17,7 @@ use super::slash_commands::commands_for_input;
+ use crate::render::Insets;
+ use crate::render::RectExt;
+ use crate::slash_command::SlashCommand;
++use codex_utils_fuzzy_match::fuzzy_match;
+ 
+ // Hide alias commands in the default popup list so each unique action appears once.
+ // `quit` is an alias of `exit`, and `btw` is an alias of `side`, so we skip
+@@ -31,6 +33,7 @@ const COMMAND_COLUMN_WIDTH: ColumnWidthConfig = ColumnWidthConfig::new(
+ pub(crate) enum CommandItem {
+     Builtin(SlashCommand),
+     ServiceTier(ServiceTierCommand),
++    Mention(MentionItem),
+ }
+ 
+ pub(crate) struct CommandPopup {
+@@ -72,6 +75,7 @@ impl CommandPopup {
+     pub(crate) fn new(
+         flags: CommandPopupFlags,
+         service_tier_commands: Vec<ServiceTierCommand>,
++        mentions: Vec<MentionItem>,
+     ) -> Self {
+         // Keep built-in availability in sync with the composer.
+         let commands = commands_for_input(flags.into(), &service_tier_commands)
+@@ -82,6 +86,7 @@ impl CommandPopup {
+                     .then_some(CommandItem::Builtin(cmd)),
+                 SlashCommandItem::ServiceTier(command) => Some(CommandItem::ServiceTier(command)),
+             })
++            .chain(mentions.into_iter().map(CommandItem::Mention))
+             .collect();
+         Self {
+             command_filter: String::new(),
+@@ -162,30 +167,44 @@ impl CommandPopup {
+         let mut prefix: Vec<(CommandItem, Option<Vec<usize>>)> = Vec::new();
+         let indices_for = |offset| Some((offset..offset + filter_chars).collect());
+ 
+-        let mut push_match =
+-            |item: CommandItem, display: &str, name: Option<&str>, name_offset: usize| {
+-                let display_lower = display.to_lowercase();
+-                let name_lower = name.map(str::to_lowercase);
+-                let display_exact = display_lower == filter_lower;
+-                let name_exact = name_lower.as_deref() == Some(filter_lower.as_str());
+-                if display_exact || name_exact {
+-                    let offset = if display_exact { 0 } else { name_offset };
+-                    exact.push((item, indices_for(offset)));
+-                    return;
+-                }
+-                let display_prefix = display_lower.starts_with(&filter_lower);
+-                let name_prefix = name_lower
+-                    .as_ref()
+-                    .is_some_and(|name| name.starts_with(&filter_lower));
+-                if display_prefix || name_prefix {
+-                    let offset = if display_prefix { 0 } else { name_offset };
+-                    prefix.push((item, indices_for(offset)));
++        {
++            let mut push_match =
++                |item: CommandItem, display: &str, name: Option<&str>, name_offset: usize| {
++                    let display_lower = display.to_lowercase();
++                    let name_lower = name.map(str::to_lowercase);
++                    let display_exact = display_lower == filter_lower;
++                    let name_exact = name_lower.as_deref() == Some(filter_lower.as_str());
++                    if display_exact || name_exact {
++                        let offset = if display_exact { 0 } else { name_offset };
++                        exact.push((item, indices_for(offset)));
++                        return;
++                    }
++                    let display_prefix = display_lower.starts_with(&filter_lower);
++                    let name_prefix = name_lower
++                        .as_ref()
++                        .is_some_and(|name| name.starts_with(&filter_lower));
++                    if display_prefix || name_prefix {
++                        let offset = if display_prefix { 0 } else { name_offset };
++                        prefix.push((item, indices_for(offset)));
++                    }
++                };
++
++            for command in self.commands.iter() {
++                if matches!(command, CommandItem::Mention(_)) {
++                    continue;
+                 }
+-            };
++                let display = command.command();
++                push_match(command.clone(), display, None, 0);
++            }
++        }
+ 
+         for command in self.commands.iter() {
+-            let display = command.command();
+-            push_match(command.clone(), display, None, 0);
++            let CommandItem::Mention(mention) = command else {
++                continue;
++            };
++            if let Some(mention_match) = mention.fuzzy_match_query(filter) {
++                prefix.push((command.clone(), mention_match.display_name_indices));
++            }
+         }
+ 
+         out.extend(exact);
+@@ -211,8 +230,8 @@ impl CommandPopup {
+                     name_prefix_spans: Vec::new(),
+                     match_indices: indices.map(|v| v.into_iter().map(|i| i + 1).collect()),
+                     display_shortcut: None,
+-                    description: Some(description),
+-                    category_tag: None,
++                    description: (!description.is_empty()).then_some(description),
++                    category_tag: item.category_tag().map(str::to_string),
+                     wrap_indent: None,
+                     is_disabled: false,
+                     disabled_reason: None,
+@@ -243,6 +262,18 @@ impl CommandPopup {
+             .selected_idx
+             .and_then(|idx| matches.get(idx).cloned())
+     }
++
++    pub(crate) fn has_completion_candidates(&self) -> bool {
++        if !self.filtered_items().is_empty() {
++            return true;
++        }
++        let filter = self.command_filter.trim();
++        !filter.is_empty()
++            && self.commands.iter().any(|command| {
++                !matches!(command, CommandItem::Mention(_))
++                    && fuzzy_match(command.command(), filter).is_some()
++            })
++    }
+ }
+ 
+ impl CommandItem {
+@@ -250,6 +281,7 @@ impl CommandItem {
+         match self {
+             Self::Builtin(cmd) => cmd.command(),
+             Self::ServiceTier(command) => &command.name,
++            Self::Mention(mention) => mention.insert_text.trim_start_matches('$'),
+         }
+     }
+ 
+@@ -257,6 +289,14 @@ impl CommandItem {
+         match self {
+             Self::Builtin(cmd) => cmd.description(),
+             Self::ServiceTier(command) => &command.description,
++            Self::Mention(mention) => mention.description.as_deref().unwrap_or(""),
++        }
++    }
++
++    fn category_tag(&self) -> Option<&str> {
++        match self {
++            Self::Builtin(_) | Self::ServiceTier(_) => None,
++            Self::Mention(mention) => mention.category_tag.as_deref(),
+         }
+     }
+ }
+@@ -283,9 +323,54 @@ mod tests {
+     use super::*;
+     use pretty_assertions::assert_eq;
+ 
++    fn skill_mention(name: &str) -> MentionItem {
++        MentionItem {
++            display_name: name.to_string(),
++            description: Some("Skill description".to_string()),
++            insert_text: format!("${name}"),
++            search_terms: vec![name.to_string()],
++            path: Some(format!("/tmp/{name}/SKILL.md")),
++            category_tag: Some("[Skill]".to_string()),
++            sort_rank: 1,
++        }
++    }
++
++    #[test]
++    fn skill_mentions_are_fuzzy_searchable_from_slash_popup() {
++        let mut popup = CommandPopup::new(
++            CommandPopupFlags::default(),
++            Vec::new(),
++            vec![skill_mention("codex-review")],
++        );
++        popup.on_composer_text_change("/cdxrv".to_string());
++
++        assert!(matches!(
++            popup.selected_item(),
++            Some(CommandItem::Mention(MentionItem { insert_text, .. }))
++                if insert_text == "$codex-review"
++        ));
++    }
++
++    #[test]
++    fn skill_mention_command_popup_snapshot() {
++        let mut popup = CommandPopup::new(
++            CommandPopupFlags::default(),
++            Vec::new(),
++            vec![skill_mention("codex-review")],
++        );
++        popup.on_composer_text_change("/cdxrv".to_string());
++
++        let width = 72;
++        let area = Rect::new(0, 0, width, popup.calculate_required_height(width));
++        let mut buf = Buffer::empty(area);
++        popup.render_ref(area, &mut buf);
++
++        insta::assert_snapshot!("command_popup_skill_mention", format!("{buf:?}"));
++    }
++
+     #[test]
+     fn filter_includes_init_when_typing_prefix() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         // Simulate the composer line starting with '/in' so the popup filters
+         // matching commands by prefix.
+         popup.on_composer_text_change("/in".to_string());
+@@ -295,7 +380,7 @@ mod tests {
+         let matches = popup.filtered_items();
+         let has_init = matches.iter().any(|item| match item {
+             CommandItem::Builtin(cmd) => cmd.command() == "init",
+-            CommandItem::ServiceTier(_) => false,
++            CommandItem::ServiceTier(_) | CommandItem::Mention(_) => false,
+         });
+         assert!(
+             has_init,
+@@ -305,7 +390,7 @@ mod tests {
+ 
+     #[test]
+     fn selecting_init_by_exact_match() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         popup.on_composer_text_change("/init".to_string());
+ 
+         // When an exact match exists, the selected command should be that
+@@ -316,13 +401,16 @@ mod tests {
+             Some(CommandItem::ServiceTier(command)) => {
+                 panic!("expected init command, got service tier {command:?}")
+             }
++            Some(CommandItem::Mention(mention)) => {
++                panic!("expected init command, got mention {mention:?}")
++            }
+             None => panic!("expected a selected command for exact match"),
+         }
+     }
+ 
+     #[test]
+     fn model_is_first_suggestion_for_mo() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         popup.on_composer_text_change("/mo".to_string());
+         let matches = popup.filtered_items();
+         match matches.first() {
+@@ -330,6 +418,9 @@ mod tests {
+             Some(CommandItem::ServiceTier(command)) => {
+                 panic!("expected model command, got service tier {command:?}")
+             }
++            Some(CommandItem::Mention(mention)) => {
++                panic!("expected model command, got mention {mention:?}")
++            }
+             None => panic!("expected at least one match for '/mo'"),
+         }
+     }
+@@ -346,6 +437,7 @@ mod tests {
+                 name: "fast".to_string(),
+                 description: "Fastest inference with increased plan usage".to_string(),
+             }],
++            Vec::new(),
+         );
+         popup.on_composer_text_change("/fa".to_string());
+ 
+@@ -369,16 +461,13 @@ mod tests {
+ 
+     #[test]
+     fn filtered_commands_keep_presentation_order_for_prefix() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         popup.on_composer_text_change("/m".to_string());
+ 
+         let cmds: Vec<String> = popup
+             .filtered_items()
+             .into_iter()
+-            .map(|item| match item {
+-                CommandItem::Builtin(cmd) => cmd.command().to_string(),
+-                CommandItem::ServiceTier(command) => command.name,
+-            })
++            .map(|item| item.command().to_string())
+             .collect();
+         assert_eq!(
+             cmds,
+@@ -394,7 +483,7 @@ mod tests {
+     #[cfg(any(target_os = "macos", target_os = "windows"))]
+     #[test]
+     fn app_command_popup_snapshot() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         popup.on_composer_text_change("/app".to_string());
+ 
+         let width = 72;
+@@ -413,7 +502,7 @@ mod tests {
+     #[cfg(target_os = "macos")]
+     #[test]
+     fn default_command_popup_items_snapshot() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         popup.on_composer_text_change("/".to_string());
+ 
+         let commands = popup
+@@ -432,16 +521,13 @@ mod tests {
+ 
+     #[test]
+     fn prefix_filter_limits_matches_for_ac() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         popup.on_composer_text_change("/ac".to_string());
+ 
+         let cmds: Vec<String> = popup
+             .filtered_items()
+             .into_iter()
+-            .map(|item| match item {
+-                CommandItem::Builtin(cmd) => cmd.command().to_string(),
+-                CommandItem::ServiceTier(command) => command.name,
+-            })
++            .map(|item| item.command().to_string())
+             .collect();
+         assert!(
+             !cmds.iter().any(|cmd| cmd == "compact"),
+@@ -451,7 +537,7 @@ mod tests {
+ 
+     #[test]
+     fn changing_filter_resets_selection_after_scrolling() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         popup.on_composer_text_change("/".to_string());
+ 
+         for _ in 0..MAX_POPUP_ROWS {
+@@ -483,7 +569,7 @@ mod tests {
+ 
+     #[test]
+     fn quit_hidden_in_empty_filter_but_shown_for_prefix() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         popup.on_composer_text_change("/".to_string());
+         let items = popup.filtered_items();
+         assert!(!items.contains(&CommandItem::Builtin(SlashCommand::Quit)));
+@@ -495,7 +581,7 @@ mod tests {
+ 
+     #[test]
+     fn btw_hidden_in_empty_filter_but_shown_for_prefix() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         popup.on_composer_text_change("/".to_string());
+         let items = popup.filtered_items();
+         assert!(!items.contains(&CommandItem::Builtin(SlashCommand::Btw)));
+@@ -507,16 +593,13 @@ mod tests {
+ 
+     #[test]
+     fn plan_command_hidden_when_collaboration_modes_disabled() {
+-        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         popup.on_composer_text_change("/".to_string());
+ 
+         let cmds: Vec<String> = popup
+             .filtered_items()
+             .into_iter()
+-            .map(|item| match item {
+-                CommandItem::Builtin(cmd) => cmd.command().to_string(),
+-                CommandItem::ServiceTier(command) => command.name,
+-            })
++            .map(|item| item.command().to_string())
+             .collect();
+         assert!(
+             !cmds.iter().any(|cmd| cmd == "plan"),
+@@ -539,6 +622,7 @@ mod tests {
+                 side_conversation_active: false,
+             },
+             Vec::new(),
++            Vec::new(),
+         );
+         popup.on_composer_text_change("/plan".to_string());
+ 
+@@ -547,6 +631,9 @@ mod tests {
+             Some(CommandItem::ServiceTier(command)) => {
+                 panic!("expected plan command, got service tier {command:?}")
+             }
++            Some(CommandItem::Mention(mention)) => {
++                panic!("expected plan command, got mention {mention:?}")
++            }
+             other => panic!("expected plan to be selected for exact match, got {other:?}"),
+         }
+     }
+@@ -566,16 +653,14 @@ mod tests {
+                 side_conversation_active: false,
+             },
+             Vec::new(),
++            Vec::new(),
+         );
+         popup.on_composer_text_change("/pers".to_string());
+ 
+         let cmds: Vec<String> = popup
+             .filtered_items()
+             .into_iter()
+-            .map(|item| match item {
+-                CommandItem::Builtin(cmd) => cmd.command().to_string(),
+-                CommandItem::ServiceTier(command) => command.name,
+-            })
++            .map(|item| item.command().to_string())
+             .collect();
+         assert!(
+             !cmds.iter().any(|cmd| cmd == "personality"),
+@@ -598,6 +683,7 @@ mod tests {
+                 side_conversation_active: false,
+             },
+             Vec::new(),
++            Vec::new(),
+         );
+         popup.on_composer_text_change("/personality".to_string());
+ 
+@@ -606,20 +692,20 @@ mod tests {
+             Some(CommandItem::ServiceTier(command)) => {
+                 panic!("expected personality command, got service tier {command:?}")
+             }
++            Some(CommandItem::Mention(mention)) => {
++                panic!("expected personality command, got mention {mention:?}")
++            }
+             other => panic!("expected personality to be selected for exact match, got {other:?}"),
+         }
+     }
+ 
+     #[test]
+     fn debug_commands_are_hidden_from_popup() {
+-        let popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new());
++        let popup = CommandPopup::new(CommandPopupFlags::default(), Vec::new(), Vec::new());
+         let cmds: Vec<String> = popup
+             .filtered_items()
+             .into_iter()
+-            .map(|item| match item {
+-                CommandItem::Builtin(cmd) => cmd.command().to_string(),
+-                CommandItem::ServiceTier(command) => command.name,
+-            })
++            .map(|item| item.command().to_string())
+             .collect();
+ 
+         assert!(
+diff --git a/codex-rs/tui/src/bottom_pane/skill_popup.rs b/codex-rs/tui/src/bottom_pane/skill_popup.rs
+index 4c7c298..b28ba5d 100644
+--- a/codex-rs/tui/src/bottom_pane/skill_popup.rs
++++ b/codex-rs/tui/src/bottom_pane/skill_popup.rs
+@@ -17,7 +17,7 @@ use crate::render::RectExt;
+ use crate::text_formatting::truncate_text;
+ use codex_utils_fuzzy_match::fuzzy_match;
+ 
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, PartialEq, Eq)]
+ pub(crate) struct MentionItem {
+     pub(crate) display_name: String,
+     pub(crate) description: Option<String>,
+@@ -32,7 +32,7 @@ pub(crate) struct MentionItem {
+ ///
+ /// `display_name_indices` is absent when only an alternate search term matched.
+ pub(crate) struct MentionMatch {
+-    display_name_indices: Option<Vec<usize>>,
++    pub(crate) display_name_indices: Option<Vec<usize>>,
+     score: i32,
+ }
+ 
+diff --git a/codex-rs/tui/src/bottom_pane/slash_commands.rs b/codex-rs/tui/src/bottom_pane/slash_commands.rs
+index 6ca1ba9..15e1db6 100644
+--- a/codex-rs/tui/src/bottom_pane/slash_commands.rs
++++ b/codex-rs/tui/src/bottom_pane/slash_commands.rs
+@@ -5,8 +5,6 @@
+ //! and ensures they stay in sync.
+ use std::str::FromStr;
+ 
+-use codex_utils_fuzzy_match::fuzzy_match;
+-
+ use crate::slash_command::SlashCommand;
+ use crate::slash_command::built_in_slash_commands;
+ 
+@@ -146,16 +144,6 @@ pub(crate) fn find_slash_command(
+         .flatten()
+ }
+ 
+-pub(crate) fn has_slash_command_prefix(
+-    name: &str,
+-    flags: BuiltinCommandFlags,
+-    service_tier_commands: &[ServiceTierCommand],
+-) -> bool {
+-    commands_for_input(flags, service_tier_commands)
+-        .into_iter()
+-        .any(|command| fuzzy_match(command.command(), name).is_some())
+-}
+-
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__command_popup__tests__command_popup_skill_mention.snap b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__command_popup__tests__command_popup_skill_mention.snap
+new file mode 100644
+index 0000000..110d022
+--- /dev/null
++++ b/codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__command_popup__tests__command_popup_skill_mention.snap
+@@ -0,0 +1,15 @@
++---
++source: tui/src/bottom_pane/command_popup.rs
++expression: "format!(\"{buf:?}\")"
++---
++Buffer {
++    area: Rect { x: 0, y: 0, width: 72, height: 1 },
++    content: [
++        "  /codex-review  Skill description  [Skill]                             ",
++    ],
++    styles: [
++        x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
++        x: 2, y: 0, fg: Cyan, bg: Reset, underline: Reset, modifier: BOLD,
++        x: 43, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
++    ]
++}
