@@ -2,6 +2,8 @@
 
 Mid-line slash autocomplete for OpenAI Codex CLI commands, skills, plugins, and apps.
 
+![Codex mid-line slash completion demo](assets/codex-midline-slash-completion.gif)
+
 Codex normally discovers slash commands only when `/` is the first character. This patch adds a unified fuzzy-search popup when you type a slash token anywhere in the composer.
 
 ```text
@@ -52,6 +54,8 @@ cargo build --release -p codex-cli
 ```
 
 The focused completion tests pass on `rust-v0.145.0`. The upstream full TUI suite at that tag currently has unrelated stored-snapshot version differences, so this repository does not claim a clean upstream-wide test run.
+
+The demo is reproducible with [`assets/demo.tape`](assets/demo.tape) and [VHS](https://github.com/charmbracelet/vhs).
 
 ## Behavior notes
 
