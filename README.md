@@ -1,5 +1,10 @@
 # Codex Mid-line Slash Completion
 
+> **Archived (2026-09-23)** — No longer maintained. Codex CLI now has a built-in way to invoke skills:
+> type `$` (or run `/skills`) to mention a skill. This patch also pins an old Codex build that newer
+> models reject, so please use the official `$skill` mention instead.
+> 더 이상 유지하지 않습니다. 공식 Codex CLI의 `$스킬` 멘션(또는 `/skills`)을 사용하세요.
+
 Mid-line slash autocomplete for OpenAI Codex CLI commands, skills, plugins, and apps.
 
 ![Codex mid-line slash completion demo](assets/codex-midline-slash-completion.gif)
